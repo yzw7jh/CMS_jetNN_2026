@@ -227,7 +227,7 @@ def apply_model(
     device : str, optional
         Torch device; auto-detected when *None*.
     batch_size : int
-        Inference batch size (default ``256``).
+        Inference batch size (default ``4096``).
     max_events : int, optional
         If given, only process this many events from the front of the
         array.

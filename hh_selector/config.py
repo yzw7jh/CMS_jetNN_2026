@@ -117,6 +117,18 @@ class CFG:
     reco_sentinel: int = -1000   # algorithm index sentinel
     truth_sentinel: int = -1     # truth-matching index sentinel
 
+    # ── basic sort parameters ──────────────────────────────────────────
+    basic_mH1_weight: float = 1.0
+    basic_mH2_weight: float = 1.0
+    basic_dpt_weight: tuple = (.2 , .2, .2)
+    basic_btag_weight: tuple = (0.0,0.0,0.0)
+    basic_params_list = {
+        'basic_mH1_weight': basic_mH1_weight,
+        'basic_mH2_weight': basic_mH2_weight,
+        'basic_dpt_weight': basic_dpt_weight,
+        'basic_btag_weight' : basic_btag_weight
+    }
+
     def __post_init__(self):
         self.ak4_feat_dim = len(self.ak4_features)
         self.ak8_feat_dim = len(self.ak8_features)

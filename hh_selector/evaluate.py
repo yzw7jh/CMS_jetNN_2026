@@ -45,17 +45,16 @@ def predict(model, loader, device="cpu") -> tuple[np.ndarray, np.ndarray, np.nda
     """
     all_pred, all_tgt, all_mask = [], [], []
     model.eval()
-    for ak4, ak4_m, ak8, ak8_m, ev, tgt, msk, hg, res_idx, semi_idx, mrg_idx in loader:
+    for ak4, ak4_m, ak8, ak8_m, ev, tgt, msk, res_idx, semi_idx, mrg_idx in loader:
         ak4 = ak4.to(device)
         ak4_m = ak4_m.to(device)
         ak8 = ak8.to(device)
         ak8_m = ak8_m.to(device)
         ev = ev.to(device)
-        hg = hg.to(device)
         res_idx = res_idx.to(device)
         semi_idx = semi_idx.to(device)
         mrg_idx = mrg_idx.to(device)
-        pred = model(ak4, ak4_m, ak8, ak8_m, ev, res_idx, semi_idx, mrg_idx, hg).cpu().numpy()
+        pred = model(ak4, ak4_m, ak8, ak8_m, ev, res_idx, semi_idx, mrg_idx).cpu().numpy()
         all_pred.append(pred)
         all_tgt.append(tgt.numpy())
         all_mask.append(msk.numpy())
@@ -192,9 +191,9 @@ def main(cfg: CFG, checkpoint: str = "best", max_events: int | None = None, devi
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    ak4_pad, ak4_mask, ak8_pad, ak8_mask, event_np, targets, mask, higgses, resolved_idx, semi_idx, merged_idx = load_data(cfg, max_events=max_events)
+    ak4_pad, ak4_mask, ak8_pad, ak8_mask, event_np, targets, mask, resolved_idx, semi_idx, merged_idx = load_data(cfg, max_events=max_events)
     ds = HHDataset(ak4_pad, ak4_mask, ak8_pad, ak8_mask,
-                   event_np, targets, mask, higgses,
+                   event_np, targets, mask,
                    resolved_idx, semi_idx, merged_idx)
     loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False,
                         num_workers=cfg.num_workers,

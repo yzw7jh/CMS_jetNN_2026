@@ -45,18 +45,16 @@ class AttentionPool(nn.Module):
 
 
 class UnifiedScorer(nn.Module):
-    """Single MLP that scores all 3 methods from pooled jet representations.
+    """Single MLP that scores all3 methods from pooled jet representations.
 
     Input: 3 method attn-pooled embeddings + 1 global pooled embedding
-           + event features (7) + topology flags (3) + algo-success flags (3)
-           + Higgs 4-vectors + dR (3 × 9)
-           = 4 * embed_dim + 27 + event_feat_dim  →  3 raw logits.
+           + event features + availability flags  →  3 raw logits.
     """
 
     def __init__(self, embed_dim: int, event_feat_dim: int,
                  mlp_hidden: tuple, dropout: float = 0.1):
         super().__init__()
-        in_dim = 4 * embed_dim + 27 + event_feat_dim  # 3 × 9 (mH1,ptH1,etaH1,phiH1,mH2,ptH2,etaH2,phiH2,dR) per method
+        in_dim = 4 * embed_dim + event_feat_dim
         layers = []
         prev = in_dim
         for h in mlp_hidden:
@@ -93,8 +91,9 @@ class HHSelector(nn.Module):
         self,
         ak4_feat_dim: int = 7,
         ak8_feat_dim: int = 7,
-        event_feat_dim: int = 13,
+        event_feat_dim: int = 10,
         embed_dim: int = 128,
+        n_heads: int = 4,
         mlp_hidden: tuple = (256, 128, 64),
         dropout: float = 0.1,
     ):
@@ -107,12 +106,6 @@ class HHSelector(nn.Module):
         self.semi_ak8_attn = AttentionPool(embed_dim)
         self.semi_ak4_attn = AttentionPool(embed_dim)
         self.mrg_attn = AttentionPool(embed_dim)
-
-        # Semi-resolved fusion: concat AK8 + AK4 pooled → project back to D
-        self.semi_fusion = nn.Linear(2 * embed_dim, embed_dim)
-
-        # Cross-method self-attention between [res, semi, mrg] at 128-d
-        self.cross_method_attn = nn.MultiheadAttention(embed_dim, num_heads=4, batch_first=True)
 
         # Unified scorer
         self.scorer = UnifiedScorer(embed_dim, event_feat_dim, mlp_hidden, dropout)
@@ -127,18 +120,15 @@ class HHSelector(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def _gather(self, embeddings: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """Gather jet embeddings by integer index, zeroing out sentinel positions.
+        """Gather jet embeddings by integer index, clamping out-of-range to 0.
 
         embeddings: (B, max_jets, D)
-        indices:    (B, n_method) — negative values are sentinel (algorithm failed)
-        Returns:    (B, n_method, D) — zero vectors where indices < 0
+        indices:    (B, n_method)
+        Returns:    (B, n_method, D)
         """
-        sentinel_mask = indices < 0
         safe_idx = indices.clamp(min=0).clamp(max=embeddings.shape[1] - 1)
         idx_exp = safe_idx.unsqueeze(-1).expand(-1, -1, embeddings.shape[-1])
-        gathered = embeddings.gather(1, idx_exp)
-        gathered = gathered * (~sentinel_mask).unsqueeze(-1).to(gathered.dtype)
-        return gathered
+        return embeddings.gather(1, idx_exp)
 
     def forward(
         self,
@@ -150,7 +140,6 @@ class HHSelector(nn.Module):
         resolved_idx: torch.Tensor,
         semi_idx: torch.Tensor,
         merged_idx: torch.Tensor,
-        higgses: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         ak4:          (B, max_ak4, ak4_feat_dim)
@@ -161,7 +150,6 @@ class HHSelector(nn.Module):
         resolved_idx: (B, 4) int — [h1b1, h1b2, h2b1, h2b2] indices into ak4
         semi_idx:     (B, 3) int — [fatjet(ak8), resb1(ak4), resb2(ak4)]
         merged_idx:   (B, 2) int — [H1(ak8), H2(ak8)]
-        higgses:      (B, 3, 9) or None — [mH1, ptH1, etaH1, phiH1, mH2, ptH2, etaH2, phiH2, dR] per method
 
         Returns: (B, 3) raw logits — [resolved, semi, merged]
         """
@@ -194,33 +182,17 @@ class HHSelector(nn.Module):
         # Semi-resolved: 1 AK8 + 2 AK4
         semi_ak8 = self._gather(ak8_emb, semi_idx[:, :1])  # (B, 1, D)
         semi_ak4 = self._gather(ak4_emb, semi_idx[:, 1:])  # (B, 2, D)
-        semi_pooled = self.semi_fusion(torch.cat([
-            self.semi_ak8_attn(semi_ak8),
-            self.semi_ak4_attn(semi_ak4),
-        ], dim=-1))  # (B, D)
+        semi_pooled = (
+            self.semi_ak8_attn(semi_ak8) + self.semi_ak4_attn(semi_ak4)
+        )  # (B, D)
 
         # Merged: 2 AK8 jets
         mrg_jets = self._gather(ak8_emb, merged_idx)     # (B, 2, D)
         mrg_pooled = self.mrg_attn(mrg_jets)              # (B, D)
 
-        # ── cross-method self-attention ──────────────────────────────────────
-        method_embs = torch.stack(
-            [res_pooled, semi_pooled, mrg_pooled], dim=1
-        )  # (B, 3, D)
-        method_embs, _ = self.cross_method_attn(
-            method_embs, method_embs, method_embs, need_weights=False
-        )  # (B, 3, D)
-        res_pooled, semi_pooled, mrg_pooled = method_embs.unbind(dim=1)
-
-        # ── concatenate per-method Higgs features (4-vectors + dR) ─────────
-        if higgses is not None:
-            res_pooled = torch.cat([res_pooled, higgses[:, 0, :]], dim=-1)   # (B, D+9)
-            semi_pooled = torch.cat([semi_pooled, higgses[:, 1, :]], dim=-1) # (B, D+9)
-            mrg_pooled = torch.cat([mrg_pooled, higgses[:, 2, :]], dim=-1)   # (B, D+9)
-
         # ── unified scoring ────────────────────────────────────────────────
         method_embs = torch.stack(
             [res_pooled, semi_pooled, mrg_pooled], dim=1
-        )  # (B, 3, D+extra)
+        )  # (B, 3, D)
 
         return self.scorer(method_embs, global_emb, event)  # (B, 3) logits
